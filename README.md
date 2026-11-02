@@ -6,6 +6,12 @@ Móvil y ordenador consultan los mismos datos si abren la misma dirección del s
 
 Para obtener una dirección compartida fuera de la red local, consulta [DEPLOY.md](DEPLOY.md). Incluye la configuración de Render con disco persistente en `render.yaml`; guardar o subir estos archivos no crea un alojamiento ni despliega la aplicación.
 
+## Windows y acceso personal
+
+Descarga [EscuelaTenis-Windows.zip](downloads/EscuelaTenis-Windows.zip), extrae los archivos y abre `EscuelaTenis.exe` (Windows 10/11 x64). Es un lanzador que abre en el navegador tu aplicación privada online; no requiere instalar Python. El PC y el móvil necesitan la misma dirección HTTPS del alojamiento. No incluye alojamiento, no funciona sin conexión y no guarda datos del club en el PC. Consulta [WINDOWS.md](WINDOWS.md) para la primera configuración y las limitaciones.
+
+El Blueprint de Render activa el modo privado: base vacía, una sola cuenta de gestor creada mediante una clave inicial del alojamiento, sin accesos demo ni familiares. Las contraseñas se eligen en la aplicación, nunca se incluyen en el ejecutable. Para desarrollo local el comando siguiente sigue iniciando la demostración; `TENNIS_PRIVATE=1` activa el modo personal y requiere `TENNIS_SETUP_TOKEN` en el primer arranque. En producción HTTPS se utiliza `TENNIS_SECURE_COOKIE=1`.
+
 ## Ejecutar
 
 Desde la raíz del repositorio:
@@ -49,10 +55,12 @@ Las pruebas HTTP usan bases SQLite temporales y cubren permisos, privacidad fami
 
 La prueba opcional `node tests/sync_browser.cjs` requiere Node, Playwright y Chromium instalados en la máquina de desarrollo (no son dependencias del servidor). `CHROMIUM_PATH` permite elegir el ejecutable de Chromium. Arranca su propio servidor y una base temporal: comprueba sincronización en ambas direcciones entre dos sesiones, diseño móvil, conservación de borradores, desconexión y recuperación.
 
+`node tests/private_browser.cjs` comprueba el primer acceso personal, la sincronización con móvil y la revocación de sesiones al cambiar la contraseña. `go test ./launcher` valida el asistente del ejecutable. El workflow `Windows executable` compila y ejecuta `--self-test` en Windows; la compilación cruzada en Linux no demuestra ejecución nativa.
+
 ## Alcance de esta versión
 
 Preparada para desarrollo local con datos de demostración. Las sesiones de acceso duran 12 horas, usan cookies HttpOnly/SameSite y las contraseñas se almacenan con PBKDF2. Las operaciones de matrícula se serializan mediante transacciones SQLite para evitar exceder plazas.
 
-Antes de usar datos reales se debe sustituir la entrada de demostración y sus cuentas públicas, desplegar detrás de HTTPS con cookies Secure y un servidor apropiado, y añadir recuperación de contraseñas, límites de intentos y copias de seguridad. No se integra una pasarela de pago ni se envían correos: los pagos se registran manualmente y los avisos se consultan dentro del módulo.
+El modo personal elimina los accesos demo, restringe el acceso al gestor y limita los intentos de autenticación. La configuración Render usa HTTPS y cookies Secure. Antes de introducir datos reales, prepara copias de seguridad y revisa el despliegue. No hay recuperación de contraseña por correo ni pasarela de pago: los pagos se registran manualmente y los avisos se consultan dentro del módulo.
 
 No se contemplan festivos, cancelación de sesiones individuales, descuentos, prorrateos, impuestos ni reservas de recuperación en otro grupo. El cierre de un grupo es definitivo en esta versión; conserva los registros históricos. Las incompatibilidades bloquean el guardado y se explican en el formulario.

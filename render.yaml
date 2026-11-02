@@ -12,4 +12,10 @@ services:
       sizeGB: 1
     envVars:
       - key: TENNIS_DB
-        value: /var/data/tennis.sqlite3
+        value: /var/data/tennis-private.sqlite3
+      - key: TENNIS_PRIVATE
+        value: "1"
+      - key: TENNIS_SECURE_COOKIE
+        value: "1"
+      - key: TENNIS_SETUP_TOKEN
+        generateValue: true

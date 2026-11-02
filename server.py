@@ -7,12 +7,16 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
+import time
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 DB_PATH = os.environ.get('TENNIS_DB', str(ROOT / 'data' / 'tennis.sqlite3'))
+PRIVATE_MODE = os.environ.get('TENNIS_PRIVATE', '0') == '1'
+SETUP_TOKEN = os.environ.get('TENNIS_SETUP_TOKEN', '')
 DAYS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 
 
@@ -38,6 +42,15 @@ def rows(db, sql, args=()):
 
 def password_hash(password, salt):
     return hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 160000).hex()
+
+
+def validate_private_configuration():
+    with connect() as db:
+        require(not db.execute("SELECT 1 FROM users WHERE email IN ('gestor@demo.local','familia@demo.local')").fetchone(),
+                'Esta base contiene cuentas de demostración. Usa una base privada nueva; conserva la anterior para una migración revisada.')
+        managers=db.execute("SELECT COUNT(*) FROM users WHERE role='manager'").fetchone()[0]
+    require(managers<=1,'El modo personal solo admite una cuenta de gestor')
+    require(managers or len(SETUP_TOKEN)>=32,'Configura TENNIS_SETUP_TOKEN con una clave aleatoria de al menos 32 caracteres antes del primer inicio privado.')
 
 
 def initialize(seed=True):
@@ -72,7 +85,7 @@ def initialize(seed=True):
         CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY, group_id INTEGER REFERENCES groups(id),
           at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL);
         ''')
-        if seed and not db.execute('SELECT 1 FROM users').fetchone():
+        if seed and not PRIVATE_MODE and not db.execute('SELECT 1 FROM users').fetchone():
             for name, email, role in [('Ana Gestora', 'gestor@demo.local', 'manager'), ('María García', 'familia@demo.local', 'client')]:
                 salt = secrets.token_hex(16)
                 db.execute('INSERT INTO users(name,email,role,salt,password) VALUES(?,?,?,?,?)',
@@ -315,6 +328,34 @@ def mutate(db,user,path,p):
 
 
 class Handler(BaseHTTPRequestHandler):
+    private_mode = PRIVATE_MODE
+    setup_token = SETUP_TOKEN
+    secure_cookie = os.environ.get('TENNIS_SECURE_COOKIE', '0') == '1'
+    auth_lock = threading.Lock()
+    auth_attempts = {}
+
+    def auth_limited(self):
+        with self.auth_lock:
+            now = time.monotonic()
+            # Bound memory and keep only the last minute of failed authentication.
+            self.auth_attempts = self.__class__.auth_attempts
+            for key in list(self.auth_attempts):
+                self.auth_attempts[key] = [t for t in self.auth_attempts[key] if now-t < 60]
+                if not self.auth_attempts[key]: del self.auth_attempts[key]
+            return len(self.auth_attempts.get(self.client_address[0], [])) >= 8
+
+    def auth_failed(self):
+        with self.auth_lock:
+            if len(self.__class__.auth_attempts) < 10000 or self.client_address[0] in self.__class__.auth_attempts:
+                self.__class__.auth_attempts.setdefault(self.client_address[0], []).append(time.monotonic())
+
+    def auth_succeeded(self):
+        with self.auth_lock:
+            self.__class__.auth_attempts.pop(self.client_address[0], None)
+
+    def session_cookie(self, token, age=43200):
+        return f'tennis_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={age}' + ('; Secure' if self.secure_cookie else '')
+
     def log_message(self, fmt, *args):
         pass
 
@@ -330,10 +371,17 @@ class Handler(BaseHTTPRequestHandler):
         try: jar.load(self.headers.get('Cookie',''))
         except cookies.CookieError: return None
         token=jar.get('tennis_session')
-        return db.execute('SELECT u.* FROM users u JOIN tokens t ON t.user_id=u.id WHERE t.token=? AND t.expires>?',
+        user=db.execute('SELECT u.* FROM users u JOIN tokens t ON t.user_id=u.id WHERE t.token=? AND t.expires>?',
                           (token.value if token else '',dt.datetime.now(dt.timezone.utc).isoformat())).fetchone()
+        if user and self.private_mode and (user['role']!='manager' or user['email'].endswith('@demo.local')):
+            return None
+        return user
 
     def do_GET(self):
+        if self.path=='/api/config':
+            with connect() as db:
+                empty = not db.execute('SELECT 1 FROM users').fetchone()
+            return self.send_json({'private': self.private_mode, 'setup_required': self.private_mode and empty})
         if self.path=='/api/state':
             with connect() as db:
                 # Every device receives a consistent snapshot, including during a save.
@@ -360,21 +408,63 @@ class Handler(BaseHTTPRequestHandler):
             length=int(self.headers.get('Content-Length',0)); require(0<length<=65536,'Tamaño de petición inválido')
             p=json.loads(self.rfile.read(length))
             with connect() as db:
+                if self.path=='/api/setup':
+                    require(self.private_mode, 'La configuración privada no está activada')
+                    if self.auth_limited(): return self.send_json({'error':'Demasiados intentos. Espera un minuto.'},429)
+                    token=str(p.get('token',''))
+                    if len(self.setup_token)<32 or not hmac.compare_digest(token,self.setup_token):
+                        self.auth_failed()
+                        return self.send_json({'error':'Clave de configuración incorrecta'},403)
+                    password=str(p.get('password',''))
+                    require(12<=len(password)<=256,'Usa una contraseña de entre 12 y 256 caracteres')
+                    name=str(p.get('name','')).strip(); email=str(p.get('email','')).strip().lower()
+                    require(name and len(name)<=100 and '@' in email and len(email)<=254,'Nombre o correo inválido')
+                    require(not email.endswith('@demo.local'),'Usa tu correo personal, no una cuenta de demostración')
+                    db.execute('BEGIN IMMEDIATE')
+                    require(not db.execute('SELECT 1 FROM users').fetchone(),'La cuenta personal ya está configurada')
+                    salt=secrets.token_hex(16)
+                    db.execute("INSERT INTO users(name,email,role,salt,password) VALUES(?,?,'manager',?,?)",(name,email,salt,password_hash(password,salt)))
+                    db.commit()
+                    self.auth_succeeded()
+                    return self.send_json({'ok':True})
                 if self.path=='/api/login':
+                    if self.private_mode and self.auth_limited(): return self.send_json({'error':'Demasiados intentos. Espera un minuto.'},429)
+                    db.execute('BEGIN IMMEDIATE')
                     u=db.execute('SELECT * FROM users WHERE email=?',(str(p.get('email','')).strip().lower(),)).fetchone()
-                    if not u or not hmac.compare_digest(password_hash(str(p.get('password','')),u['salt']),u['password']):
+                    valid_hash=password_hash(str(p.get('password','')),'invalid-account' if not u else u['salt'])
+                    if not u or (self.private_mode and (u['role']!='manager' or u['email'].endswith('@demo.local'))) or not hmac.compare_digest(valid_hash,u['password']):
+                        if self.private_mode: self.auth_failed()
                         return self.send_json({'error':'Correo o contraseña incorrectos'},401)
+                    if self.private_mode: self.auth_succeeded()
                     token=secrets.token_urlsafe(32)
                     db.execute('DELETE FROM tokens WHERE expires<?',(dt.datetime.now(dt.timezone.utc).isoformat(),))
                     db.execute('INSERT INTO tokens VALUES(?,?,?)',(token,u['id'],(dt.datetime.now(dt.timezone.utc)+dt.timedelta(hours=12)).isoformat()))
-                    return self.send_json({'ok':True},cookie=f'tennis_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200')
+                    db.commit()
+                    return self.send_json({'ok':True},cookie=self.session_cookie(token))
+                # Authentication and writes share a transaction: a revoked session
+                # cannot race a password change and still authorize a later write.
+                db.execute('BEGIN IMMEDIATE')
                 user=self.user(db)
                 if not user: return self.send_json({'error':'Inicia sesión'},401)
+                if self.path=='/api/password':
+                    require(self.private_mode and user['role']=='manager','Solo disponible para la cuenta personal')
+                    if self.auth_limited(): return self.send_json({'error':'Demasiados intentos. Espera un minuto.'},429)
+                    if not hmac.compare_digest(password_hash(str(p.get('current_password','')),user['salt']),user['password']):
+                        self.auth_failed()
+                        return self.send_json({'error':'Contraseña actual incorrecta'},403)
+                    password=str(p.get('password',''))
+                    require(12<=len(password)<=256,'Usa una contraseña de entre 12 y 256 caracteres')
+                    salt=secrets.token_hex(16); token=secrets.token_urlsafe(32)
+                    db.execute('UPDATE users SET salt=?,password=? WHERE id=?',(salt,password_hash(password,salt),user['id']))
+                    db.execute('DELETE FROM tokens WHERE user_id=?',(user['id'],))
+                    db.execute('INSERT INTO tokens VALUES(?,?,?)',(token,user['id'],(dt.datetime.now(dt.timezone.utc)+dt.timedelta(hours=12)).isoformat()))
+                    result=state(db,user);db.commit();self.auth_succeeded()
+                    return self.send_json(result,cookie=self.session_cookie(token))
                 if self.path=='/api/logout':
                     jar=cookies.SimpleCookie(self.headers.get('Cookie','')); db.execute('DELETE FROM tokens WHERE token=?',(jar['tennis_session'].value,))
-                    return self.send_json({'ok':True},cookie='tennis_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
-                # Serialize capacity checks and their mutations across concurrent requests.
-                db.execute('BEGIN IMMEDIATE')
+                    db.commit()
+                    return self.send_json({'ok':True},cookie=self.session_cookie('',0))
+                # Capacity checks and mutations remain in the same write transaction.
                 mutate(db,user,self.path.removeprefix('/api/'),p)
                 result=state(db,user)
             self.send_json(result)
@@ -390,6 +480,9 @@ class Handler(BaseHTTPRequestHandler):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=8000); parser.add_argument('--host',default='127.0.0.1'); parser.add_argument('--no-seed',action='store_true')
     args=parser.parse_args(); initialize(not args.no_seed)
+    if PRIVATE_MODE:
+        try: validate_private_configuration()
+        except Invalid as error: parser.error(str(error))
     http=ThreadingHTTPServer((args.host,args.port),Handler)
     print(f'Escuela de tenis · puerto {http.server_port}',flush=True)
     http.serve_forever()

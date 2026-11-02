@@ -1,0 +1,35 @@
+name: Windows executable
+on:
+  push:
+    branches: [main]
+    paths: ["launcher/**", "go.mod", "tools/build_windows.py", "WINDOWS.md", ".github/workflows/windows.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.3"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test launcher
+        run: go test ./launcher
+      - name: Build executable
+        run: python tools/build_windows.py
+      - name: Run native Windows self-test
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\dist\EscuelaTenis.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Windows self-test failed: $($process.ExitCode)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EscuelaTenis-Windows
+          path: |
+            dist/EscuelaTenis.exe
+            downloads/EscuelaTenis-Windows.zip
+            downloads/SHA256SUMS.txt
