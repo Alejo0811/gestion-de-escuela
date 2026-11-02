@@ -1,0 +1,15 @@
+# One shared server and a persistent disk: do not run separate databases per device.
+services:
+  - type: web
+    name: escuela-tenis
+    runtime: python
+    plan: starter
+    buildCommand: python -m compileall -q server.py
+    startCommand: python server.py --host 0.0.0.0 --port $PORT
+    disk:
+      name: escuela-datos
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: TENNIS_DB
+        value: /var/data/tennis.sqlite3

@@ -336,14 +336,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path=='/api/state':
             with connect() as db:
+                # Every device receives a consistent snapshot, including during a save.
+                db.execute('BEGIN')
                 user=self.user(db)
                 return self.send_json(state(db,user) if user else {'error':'Inicia sesión'},200 if user else 401)
-        files={'/':'index.html','/app.js':'app.js','/style.css':'style.css'}
+        files={'/':'index.html','/app.js':'app.js','/sync.js':'sync.js','/style.css':'style.css'}
         name=files.get(self.path.split('?')[0])
         if not name: return self.send_json({'error':'No encontrado'},404)
         data=(ROOT/'web'/name).read_bytes(); self.send_response(200)
         self.send_header('Content-Type',{'html':'text/html; charset=utf-8','css':'text/css','js':'text/javascript'}[name.split('.')[-1]])
         self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('Cache-Control','no-cache')
         self.send_header('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
 
@@ -387,5 +390,6 @@ class Handler(BaseHTTPRequestHandler):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=8000); parser.add_argument('--host',default='127.0.0.1'); parser.add_argument('--no-seed',action='store_true')
     args=parser.parse_args(); initialize(not args.no_seed)
-    print(f'Escuela de tenis · puerto {args.port}',flush=True)
-    ThreadingHTTPServer((args.host,args.port),Handler).serve_forever()
+    http=ThreadingHTTPServer((args.host,args.port),Handler)
+    print(f'Escuela de tenis · puerto {http.server_port}',flush=True)
+    http.serve_forever()

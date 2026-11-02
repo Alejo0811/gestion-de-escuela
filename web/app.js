@@ -3,6 +3,7 @@ const euro=n=>new Intl.NumberFormat('es-ES',{style:'currency',currency:'EUR',max
 const days=['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'];
 const today=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`};
 const dateLabel=s=>new Date(s+'T12:00:00').toLocaleDateString('es-ES',{day:'numeric',month:'short',year:'numeric'});
+let sync, writing=0, syncStatus='current';
 let S, page='groups', tab='active', child=null, filters={}, toastTimer;
 const cat=id=>S.catalogs.find(c=>c.id==id), cname=id=>cat(id)?.name||'—', group=id=>S.groups.find(g=>g.id==id), student=id=>S.students.find(s=>s.id==id), manager=()=>S.user.role==='manager';
 const fee=g=>cat(g.tariff_id)?.value||0, revenue=g=>g.count*fee(g), occupancy=g=>g.count>=g.capacity?'full':g.count/g.capacity>=.8?'near':g.count/g.capacity<=.5?'low':'normal';
@@ -11,7 +12,34 @@ const members=gid=>S.memberships.filter(m=>m.group_id==gid).map(m=>student(m.stu
 const myGroups=()=>S.memberships.filter(m=>m.student_id==child).map(m=>group(m.group_id)).filter(Boolean);
 const pending=()=>S.requests.filter(r=>r.status==='pending');
 function toast(msg,error=false){const t=$('#toast');t.textContent=msg;t.className='show'+(error?' error-toast':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.className='',5000)}
-async function api(path,data){const res=await fetch('/api/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const result=await res.json();if(!res.ok)throw Error(result.error||'No se pudo completar la acción');return result}
+async function api(path,data){
+  const mutation=data!==undefined;
+  if(mutation){writing++;sync?.invalidate()}
+  try{
+    const res=await fetch('/api/'+path,{...(mutation?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}:{}),cache:'no-store',signal:AbortSignal.timeout(15000)});
+    const result=await res.json();
+    if(!res.ok){const error=Error(result.error||'No se pudo completar la acción');error.status=res.status;throw error}
+    if(mutation&&result.user)sync?.accept(result);
+    return result;
+  }catch(error){
+    if(mutation&&!error.status)throw Error('No se ha podido confirmar el guardado. Comprueba la conexión y actualiza antes de repetir la operación.');
+    throw error;
+  }finally{if(mutation)writing--}
+}
+const syncLabels={current:'Actualizado',pending:'Hay cambios · termina de editar',offline:'Sin conexión',error:'No se puede actualizar',expired:'Sesión caducada'};
+function showSyncStatus(status){syncStatus=status;const indicator=$('#sync-status');if(indicator){indicator.dataset.state=status;indicator.textContent=syncLabels[status]}}
+function beginSync(){
+  sync?.stop();
+  sync=new window.StateSync({
+    load:()=>api('state'),
+    canApply:()=>!writing&&!$('#modal').open&&!document.activeElement?.matches('input,select,textarea,[contenteditable="true"]'),
+    status:showSyncStatus,
+    apply:data=>{const y=window.scrollY;S=data;render();window.scrollTo(0,y)},
+    expired:()=>{sync.stop();S=null;loginView();toast('Tu sesión ha caducado. Vuelve a entrar.',true)}
+  });
+  sync.start(S);
+}
+
 async function change(path,data,msg='Cambios guardados'){try{S=await api(path,data);render();toast(msg);return true}catch(e){toast(e.message,true);return false}}
 function open(title,body){$('#modal-content').innerHTML=`<div class="modal-head"><h2>${esc(title)}</h2><button data-action="dismiss" aria-label="Cerrar">×</button></div>${body}`;if(!$('#modal').open)$('#modal').showModal()}
 function close(){$('#modal').close()}
@@ -19,11 +47,11 @@ const options=(kind,selected)=>S.catalogs.filter(c=>c.kind===kind).map(c=>`<opti
 const goptions=(selected,exclude)=>S.groups.filter(g=>g.status==='active'&&g.id!=exclude).map(g=>`<option value="${g.id}" ${g.id==selected?'selected':''}>${esc(g.name)} · ${g.count}/${g.capacity}</option>`).join('');
 const formEnd=(label='Guardar')=>`<div class="error" id="form-error" role="alert"></div><div class="form-footer"><button type="button" class="secondary" data-action="dismiss">Cancelar</button><button class="primary" type="submit">${label}</button></div>`;
 function loginView(){ $('#app').innerHTML=`<div class="login"><section class="login-art"><div class="brand"><span class="ball">◒</span> clubtenis<span class="subtle"> / escuela</span></div><div><div class="eyebrow">NOS VEMOS EN LA PISTA</div><h1>El próximo punto<br>empieza aquí.</h1><p>Un espacio para crecer, compartir y disfrutar del tenis. Dentro y fuera de la pista.</p></div><small>ESCUELA DE TENIS · GESTIÓN DEL CLUB</small></section><section class="login-form"><div class="eyebrow">TU CLUB, MÁS CERCA</div><h2>Bienvenido a la escuela</h2><p>Accede a tu espacio de tenis.</p><form id="login-form"><label>Correo electrónico<input type="email" name="email" required autocomplete="username" placeholder="tu@correo.es"></label><label>Contraseña<input type="password" name="password" required autocomplete="current-password"></label><div id="login-error" class="error" role="alert"></div><button class="primary">Entrar a mi espacio →</button></form><div class="demo-login"><p>ENTORNO DE DEMOSTRACIÓN · DATOS FICTICIOS</p><div><button class="secondary" data-action="demo" data-role="gestor">Explorar como gestor</button><button class="secondary" data-action="demo" data-role="familia">Ver mi familia</button></div></div></section></div>`; }
-async function login(email,password){try{await api('login',{email,password});S=await api('state');page=manager()?'groups':'home';child=S.students[0]?.id;filters={};render()}catch(e){$('#login-error').textContent=e.message}}
+async function login(email,password){try{await api('login',{email,password});S=await api('state');page=manager()?'groups':'home';child=S.students[0]?.id;filters={};render();beginSync()}catch(e){$('#login-error').textContent=e.message}}
 function render(){if(!S)return loginView();if(!child||!student(child))child=S.students[0]?.id;
 const nav=manager()?[['groups','▦','Grupos'],['students','♙','Alumnos y tutores'],['requests','⇄','Solicitudes'],['sessions','▤','Asistencia'],['profit','→','Rentabilidad'],['payments','€','Pagos'],['catalog','⚙','Configuración']]:[['home','⌂','Mi escuela'],['requests','⇄','Mis solicitudes'],['payments','€','Mis pagos']];
 const title=nav.find(n=>n[0]===page)?.[2]||'Escuela';
-$('#app').innerHTML=`<div class="layout"><aside class="sidebar"><div class="brand"><span class="ball">◒</span>clubtenis</div><div class="nav-label">ESPACIO ${manager()?'DE GESTIÓN':'PERSONAL'}</div><nav class="nav" aria-label="Navegación">${nav.map(([id,icon,label])=>`<button data-action="nav" data-page="${id}" class="${page===id?'active':''}"><span>${icon}</span>${label}${id==='requests'&&pending().length?`<span class="count">${pending().length}</span>`:''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="user"><span class="avatar">${esc(S.user.name.split(' ').map(x=>x[0]).slice(0,2).join(''))}</span><div>${esc(S.user.name)}<small>${manager()?'Administración del club':'Cuenta familiar'}</small></div></div><button class="link small" data-action="logout">Cerrar sesión →</button></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">Club <span> / </span> Escuela de tenis <span> / </span> <b>${esc(title)}</b></div><div class="top-right"><span class="demo-badge">Entorno local · demo</span><span class="date-label">${new Date().toLocaleDateString('es-ES',{day:'numeric',month:'long'})}</span><button class="link small" data-action="logout" aria-label="Cerrar sesión">Salir →</button></div></header><div class="content">${!manager()?`<div class="section-bar"><span class="eyebrow">ESPACIO FAMILIAR</span><label>Viendo a <select id="child-select" aria-label="Seleccionar hijo o alumno">${S.students.map(s=>`<option value="${s.id}" ${s.id==child?'selected':''}>${esc(s.name)}</option>`).join('')}</select></label></div>`:''}<div id="page-body">${({groups:groupsView,students:studentsView,requests:requestsView,sessions:attendanceView,profit:profitView,payments:paymentsView,catalog:catalogView,home:homeView}[page]||groupsView)()}</div><footer class="footer-note"><span>CLUBTENIS / Escuela de tenis</span><span>Los pequeños progresos hacen grandes jugadores.</span></footer></div></main></div>`;
+$('#app').innerHTML=`<div class="layout"><aside class="sidebar"><div class="brand"><span class="ball">◒</span>clubtenis</div><div class="nav-label">ESPACIO ${manager()?'DE GESTIÓN':'PERSONAL'}</div><nav class="nav" aria-label="Navegación">${nav.map(([id,icon,label])=>`<button data-action="nav" data-page="${id}" class="${page===id?'active':''}"><span>${icon}</span>${label}${id==='requests'&&pending().length?`<span class="count">${pending().length}</span>`:''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="user"><span class="avatar">${esc(S.user.name.split(' ').map(x=>x[0]).slice(0,2).join(''))}</span><div>${esc(S.user.name)}<small>${manager()?'Administración del club':'Cuenta familiar'}</small></div></div><button class="link small" data-action="logout">Cerrar sesión →</button></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">Club <span> / </span> Escuela de tenis <span> / </span> <b>${esc(title)}</b></div><div class="top-right"><button id="sync-status" class="sync-status" data-action="refresh" data-state="${syncStatus}" title="Actualizar datos del servidor" aria-live="polite">${syncLabels[syncStatus]}</button><span class="demo-badge">Demo</span><span class="date-label">${new Date().toLocaleDateString('es-ES',{day:'numeric',month:'long'})}</span><button class="link small" data-action="logout" aria-label="Cerrar sesión">Salir →</button></div></header><div class="content">${!manager()?`<div class="section-bar"><span class="eyebrow">ESPACIO FAMILIAR</span><label>Viendo a <select id="child-select" aria-label="Seleccionar hijo o alumno">${S.students.map(s=>`<option value="${s.id}" ${s.id==child?'selected':''}>${esc(s.name)}</option>`).join('')}</select></label></div>`:''}<div id="page-body">${({groups:groupsView,students:studentsView,requests:requestsView,sessions:attendanceView,profit:profitView,payments:paymentsView,catalog:catalogView,home:homeView}[page]||groupsView)()}</div><footer class="footer-note"><span>CLUBTENIS / Escuela de tenis</span><span>Los pequeños progresos hacen grandes jugadores.</span></footer></div></main></div>`;
 }
 const heading=(k,title,desc,actions='')=>`<div class="heading"><div><div class="eyebrow">${k}</div><h1>${title}</h1><p>${desc}</p></div><div class="heading-actions">${actions}</div></div>`;
 const stat=(label,value,note,icon)=>`<div class="stat"><div class="stat-top">${label}<span class="stat-icon">${icon}</span></div><strong>${value}</strong><small>${note}</small></div>`;
@@ -52,7 +80,8 @@ function catalogForm(kind,id){const c=cat(id);open(c?'Editar registro':'Nuevo re
 function alerts(){const gs=S.groups.filter(g=>g.status==='active'),conflicts=[];for(let i=0;i<gs.length;i++)for(let j=i+1;j<gs.length;j++){const a=gs[i],b=gs[j];if(a.days.some(d=>b.days.includes(d))&&a.start<b.end&&b.start<a.end&&a.starts_on<=b.ends_on&&b.starts_on<=a.ends_on&&(a.coach_id===b.coach_id||a.court_id===b.court_id))conflicts.push(`${a.name} / ${b.name}`)}open('Avisos de la escuela',`<h3>Baja ocupación</h3>${gs.filter(g=>occupancy(g)==='low').map(g=>`<div class="list-row"><span>${esc(g.name)}</span>${badge(g)}</div>`).join('')||'<p>Sin avisos.</p>'}<h3>Grupos completos</h3>${gs.filter(g=>occupancy(g)==='full').map(g=>`<div class="list-row"><span>${esc(g.name)}</span>${badge(g)}</div>`).join('')||'<p>Sin grupos completos.</p>'}<h3>Listas de espera</h3>${pending().filter(r=>r.target_id&&group(r.target_id)?.count>=group(r.target_id)?.capacity).map(r=>`<div class="list-row">${esc(student(r.student_id)?.name)} → ${esc(group(r.target_id)?.name)}</div>`).join('')||'<p>Sin solicitudes en espera de plaza.</p>'}<h3>Incompatibilidades de recursos</h3>${conflicts.map(c=>`<div class="notice">${esc(c)}</div>`).join('')||'<p>No se detectan solapamientos. Las nuevas asignaciones se comprueban al guardar.</p>'}`)}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-action]');if(!b)return;const a=b.dataset.action,id=+b.dataset.id,gid=+b.dataset.group;
 if(a==='dismiss')return close();if(a==='demo')return login(b.dataset.role+'@demo.local','TenisDemo2026!');
-if(a==='nav'){page=b.dataset.page;render()}if(a==='logout'){await api('logout',{});S=null;close();loginView()}
+if(a==='refresh')return sync?.refresh();
+if(a==='nav'){page=b.dataset.page;render()}if(a==='logout'){try{await api('logout',{});sync?.stop();S=null;close();loginView()}catch(error){toast(error.message,true)}}
 if(a==='new-group')groupForm();if(a==='edit-group')groupForm(id);if(a==='duplicate')groupForm(id,true);if(a==='detail')groupDetail(id);
 if(a==='tab'){tab=b.dataset.tab;render()}if(a==='clear-filters'){filters={};render()}if(a==='alerts')alerts();
 if(a==='student-form')studentForm(id);if(a==='tutor-form')tutorForm(id);if(a==='catalog-form')catalogForm(b.dataset.kind,id);if(a==='request-form')requestForm();
@@ -75,4 +104,8 @@ function updateResults(){if(!$('#group-results'))return;$('#group-results').inne
 document.addEventListener('submit',async e=>{if(e.target.id==='login-form'){e.preventDefault();const f=new FormData(e.target);return login(f.get('email'),f.get('password'))}const form=e.target.closest('[data-form]');if(!form)return;e.preventDefault();const f=new FormData(form),p=Object.fromEntries(f);for(const k of ['id','duplicate_of','student_id','group_id','source_id','target_id','level_id','coach_id','court_id','tariff_id','guardian_id','user_id'])if(k in p)p[k]=p[k]?+p[k]:null;
 if(form.dataset.form==='groups')p.days=f.getAll('days').map(Number);if(form.dataset.form==='requests'){if(p.kind==='alta')p.source_id=null;if(p.kind==='baja')p.target_id=null;if((p.kind!=='alta'&&!p.source_id)||(p.kind!=='baja'&&!p.target_id)){$('#form-error').textContent='Selecciona los grupos de la solicitud';return}}
 const submit=form.querySelector('[type="submit"]');submit.disabled=true;try{S=await api(form.dataset.form,p);close();render();toast(form.dataset.form==='requests'?'Solicitud enviada al gestor':'Cambios guardados')}catch(err){$('#form-error').textContent=err.message}finally{submit.disabled=false}});
-api('state').then(data=>{S=data;page=manager()?'groups':'home';child=S.students[0]?.id;render()}).catch(()=>loginView());
+api('state').then(data=>{S=data;page=manager()?'groups':'home';child=S.students[0]?.id;render();beginSync()}).catch(()=>loginView());
+
+$('#modal').addEventListener('close',()=>sync?.refresh());
+window.addEventListener('pagehide',()=>sync?.stop());
+window.addEventListener('pageshow',event=>{if(event.persisted&&S)beginSync()});

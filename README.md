@@ -2,6 +2,10 @@
 
 Aplicación autónoma en español para gestionar una escuela y ofrecer un espacio a sus alumnos y familias. Python 3.11+ y SQLite; no requiere instalar paquetes ni servicios externos. Interfaz adaptable a móvil y escritorio.
 
+Móvil y ordenador consultan los mismos datos si abren la misma dirección del servidor. Las pantallas se actualizan automáticamente aproximadamente cada cinco segundos, al recuperar conexión y al volver a la pestaña. Los formularios abiertos se conservan hasta cerrarlos. El indicador superior muestra el estado de actualización y permite consultar de nuevo manualmente.
+
+Para obtener una dirección compartida fuera de la red local, consulta [DEPLOY.md](DEPLOY.md). Incluye la configuración de Render con disco persistente en `render.yaml`; guardar o subir estos archivos no crea un alojamiento ni despliega la aplicación.
+
 ## Ejecutar
 
 Desde la raíz del repositorio:
@@ -38,9 +42,12 @@ La cuenta familiar permite cambiar entre Lucas y Sofía. El gestor puede crear o
 ```sh
 python3 -m unittest discover -s tests -v
 node --check web/app.js
+node --check web/sync.js
 ```
 
 Las pruebas HTTP usan bases SQLite temporales y cubren permisos, privacidad familiar, aprobación/rechazo, lista de espera, traslados, cupos, aprobaciones concurrentes de la última plaza, incompatibilidades, duplicación, asistencia, recuperaciones, recibos e idempotencia. No modifican los datos de desarrollo. El entorno debe permitir sockets locales para ejecutarlas.
+
+La prueba opcional `node tests/sync_browser.cjs` requiere Node, Playwright y Chromium instalados en la máquina de desarrollo (no son dependencias del servidor). `CHROMIUM_PATH` permite elegir el ejecutable de Chromium. Arranca su propio servidor y una base temporal: comprueba sincronización en ambas direcciones entre dos sesiones, diseño móvil, conservación de borradores, desconexión y recuperación.
 
 ## Alcance de esta versión
 
